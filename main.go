@@ -1,4 +1,4 @@
-package main
+package utils
 
 import (
 	"encoding/json"
@@ -14,10 +14,6 @@ import (
 type MalformedRequest struct {
 	Status int
 	Msg    string
-}
-
-func main() {
-
 }
 
 func (mr *MalformedRequest) Error() string {
