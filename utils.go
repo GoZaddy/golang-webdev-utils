@@ -6,30 +6,52 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gomodule/redigo/redis"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"gopkg.in/go-playground/validator.v9"
 )
 
+//MalformedRequest represents the structure for error messages associated with a bad request
 type MalformedRequest struct {
 	Status int
 	Msg    string
 }
 
+type TokenDetails struct {
+	AccessToken  string
+	RefreshToken string
+	AccessUuid   string
+	RefreshUuid  string
+	AtExpires    int64
+	RtExpires    int64
+}
+
+type JwtToken struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+//InitEndpointOptions is used with the InitEndPointWithOptions function
+type InitEndpointOptions struct {
+	Methods string
+	Origin  string
+}
+
+//ContextKey defines a custom type for keys in context values
+type ContextKey string
+
 func (mr *MalformedRequest) Error() string {
 	return mr.Msg
 }
 
-//CheckError checks for errors (internal server errors) and return appropriate error code
-func CheckError(w http.ResponseWriter, err error) {
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-}
-
-//InitEndPoint allows this endpoint to be accessed by clients
+//InitEndPoint allows this endpoint to be accessed by clients. Should not be used. Use InitEndPointWithOptions instead
 func InitEndPoint(w http.ResponseWriter, r *http.Request) {
+	//to be refactored to include method type as argument
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -38,21 +60,31 @@ func InitEndPoint(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+//InitEndpointWithOptions is a variant of InitEndpointWithOptions.
+func InitEndpointWithOptions(w http.ResponseWriter, r *http.Request, options InitEndpointOptions) {
+	w.Header().Set("Access-Control-Allow-Origin", options.Origin)
+	w.Header().Set("Access-Control-Allow-Methods", options.Methods)
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 //DecodeJSONBody works like a regular request body decoding but handles all errors appropriately
 func DecodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) error {
-	/*if r.Header.Get("Content-Type") != "" {
+	if r.Header.Get("Content-Type") != "" {
 		fmt.Println(r.Header.Get("Content-Type"))
 		value := r.Header.Get("Content-Type")
 		if value != "application/json" {
 			msg := "Content-Type header is not application/json"
 			return &MalformedRequest{Status: http.StatusUnsupportedMediaType, Msg: msg}
 		}
-	}*/
+	}
 
 	//r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 
 	dec := json.NewDecoder(r.Body)
-	//dec.DisallowUnknownFields()
+	dec.DisallowUnknownFields()
 
 	err := dec.Decode(dst)
 	if err != nil {
@@ -103,6 +135,7 @@ func DecodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) err
 func EncodeJSON(w http.ResponseWriter, input interface{}) {
 	e := json.NewEncoder(w)
 	e.SetIndent(" ", "    ")
+	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	e.Encode(&input)
 }
 
@@ -132,4 +165,60 @@ func ValidateStructFromRequestBody(w http.ResponseWriter, input interface{}) boo
 	}
 
 	return true
+}
+
+//CreateToken
+func CreateToken(accessTokenSecret string, refreshTokenSecret string, userid string) (*TokenDetails, error) {
+	td := &TokenDetails{}
+	td.AtExpires = time.Now().Add(time.Minute * 15).Unix()
+	accessUUID := primitive.NewObjectID().Hex()
+	td.AccessUuid = accessUUID
+
+	td.RtExpires = time.Now().Add(time.Hour * 24 * 7).Unix()
+	refreshUUID := primitive.NewObjectID().Hex()
+
+	td.RefreshUuid = refreshUUID
+
+	atClaims := jwt.MapClaims{}
+	atClaims["authorized"] = true
+	atClaims["access_uuid"] = td.AccessUuid
+	atClaims["user_id"] = userid
+	atClaims["exp"] = td.AtExpires
+
+	var err error
+
+	at := jwt.NewWithClaims(jwt.SigningMethodHS256, atClaims)
+	td.AccessToken, err = at.SignedString([]byte(accessTokenSecret))
+	if err != nil {
+		return nil, err
+	}
+	//Creating Refresh Token
+
+	rtClaims := jwt.MapClaims{}
+	rtClaims["refresh_uuid"] = td.RefreshUuid
+	rtClaims["user_id"] = userid
+	rtClaims["exp"] = td.RtExpires
+	rt := jwt.NewWithClaims(jwt.SigningMethodHS256, rtClaims)
+	td.RefreshToken, err = rt.SignedString([]byte(refreshTokenSecret))
+	if err != nil {
+		return nil, err
+	}
+	return td, nil
+}
+
+//CreateAuth saves the refresh token and access token metadata in a redis store
+func CreateAuth(userid string, td *TokenDetails, redisStore redis.Conn) error {
+	at := time.Unix(td.AtExpires, 0) //converting Unix to UTC(to Time object)
+	rt := time.Unix(td.RtExpires, 0)
+	now := time.Now()
+
+	_, errAccess := redisStore.Do("SETEX", td.AccessUuid, strconv.Itoa(int(at.Sub(now).Seconds())), userid)
+	if errAccess != nil {
+		return errAccess
+	}
+	_, errRefresh := redisStore.Do("SETEX", td.RefreshUuid, strconv.Itoa(int(rt.Sub(now).Seconds())), userid)
+	if errRefresh != nil {
+		return errRefresh
+	}
+	return nil
 }
