@@ -49,17 +49,6 @@ func (mr *MalformedRequest) Error() string {
 	return mr.Msg
 }
 
-//InitEndPoint allows this endpoint to be accessed by clients. Should not be used. Use InitEndPointWithOptions instead
-func InitEndPoint(w http.ResponseWriter, r *http.Request) {
-	//to be refactored to include method type as argument
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-	}
-}
-
 //InitEndpointWithOptions is a variant of InitEndpointWithOptions.
 func InitEndpointWithOptions(w http.ResponseWriter, r *http.Request, options InitEndpointOptions) {
 	w.Header().Set("Access-Control-Allow-Origin", options.Origin)
